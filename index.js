@@ -11,13 +11,13 @@ import { mkdir, readdir, stat, unlink } from 'node:fs/promises'
 import { QQBot, historyBuffer, quoteRef, mentionGate } from '@tencent-connect/qqbot-nodejs'
 import { startQrConnect } from '@tencent-connect/qqbot-connector'
 import { z } from 'zod'
-import { chunkText, isWithinRoot, mediaTypeOf, stripMentions, MEDIA_ROOT } from './lib/util.js'
+import { chunkText, isWithinRoot, mediaTypeOf, renderMentions, MEDIA_ROOT } from './lib/util.js'
 import { downloadAttachment, sendMediaFile } from './lib/media.js'
 
 export const name = 'qq-attach'
 
 /** Bumped on every behavioural change; surfaced by the `status` endpoint. */
-const BUILD = '0.3.4-ctx-name-fix'
+const BUILD = '0.4.0-mention-names'
 export const inject = [
   'agents', 'sessions', 'sessionController', 'storageDomain', 'credentials',
   'webServer', 'systemPrompt', 'tools', 'sessionQuery', 'attachments',
@@ -114,7 +114,33 @@ export async function apply(ctx, config = {}) {
    * gate treated it as addressed, and whether it reached a session. Exposed by
    * the status endpoint because a dropped message leaves no other trace.
    */
-  const inbound = { total: 0, group: 0, groupSkipped: 0, delivered: 0, failed: 0, last: null }
+  const inbound = { total: 0, group: 0, groupSkipped: 0, delivered: 0, failed: 0, last: null, byEvent: {}, recent: [] }
+
+  /**
+   * Mention id to readable handle. QQ identifies mentions by opaque openid, so the
+   * only way to render a name is to learn it from `mentions[]` payloads first.
+   * Ids that were never seen stay verbatim rather than being guessed.
+   */
+  const mentionNames = new Map()
+  const botMentionIds = new Set()
+
+  /** Record the ids and names carried by one inbound message. */
+  const learnMentions = (msg) => {
+    if (!Array.isArray(msg?.mentions)) return
+    for (const mention of msg.mentions) {
+      const id = mention?.member_openid ?? mention?.user_openid ?? mention?.id
+      if (!id) continue
+      if (mention?.is_you === true) { botMentionIds.add(id); continue }
+      const name = mention?.nickname || mention?.username
+      if (name) mentionNames.set(id, `@${name}`)
+    }
+  }
+
+  /** Replacement for one mention id; undefined keeps the raw marker. */
+  const resolveMention = (id) => {
+    if (botMentionIds.has(id)) return '@you'
+    return mentionNames.get(id)
+  }
 
   /** Gateway state from the SDK's own ready/disconnected events. */
   const link = { connected: false, readyAt: 0, disconnectedAt: 0, reason: null }
@@ -338,7 +364,32 @@ export async function apply(ctx, config = {}) {
       if (msg.kind !== 'c2c' && msg.kind !== 'group') return
       inbound.total += 1
       if (msg.kind === 'group') inbound.group += 1
+      // Event-type tally plus a short ring of recent arrivals: a platform that
+      // flushes missed group messages on the next mention would show up here as
+      // several entries in a burst.
+      const eventType = msg.rawEventType ?? 'unknown'
+      inbound.byEvent[eventType] = (inbound.byEvent[eventType] ?? 0) + 1
+      inbound.recent = [...inbound.recent, {
+        at: Date.now(),
+        event: eventType,
+        kind: msg.kind,
+        text: String(msg.content ?? '').slice(0, 30),
+        // What the platform actually ships in `mentions`, for deciding how to
+        // render addresses: which ids resolve to names, and whether the bot's own
+        // entry is distinguishable.
+        mentions: Array.isArray(msg.mentions)
+          ? msg.mentions.slice(0, 3).map(mention => ({
+              is_you: mention?.is_you,
+              bot: mention?.bot,
+              nickname: mention?.nickname,
+              id: String(mention?.member_openid ?? mention?.user_openid ?? mention?.id ?? '').slice(0, 8),
+            }))
+          : null,
+      }].slice(-8)
       if (msg.senderIsBot) return
+      // Learn names before any gating: a skipped message may be the only place a
+      // member's nickname appears.
+      learnMentions(msg)
       const target = targetOf(msg)
       if (!target) return
       const att = attaches.get(target)
@@ -356,9 +407,11 @@ export async function apply(ctx, config = {}) {
         event: msg.rawEventType ?? null,
         addressed: mentioned,
         text: String(msg.content ?? '').slice(0, 40),
+        elements: Array.isArray(msg.msgElements) ? msg.msgElements.length : 0,
+        scene: Array.isArray(msg.messageScene?.ext) ? msg.messageScene.ext.slice(0, 4) : undefined,
       }
       if (msg.kind === 'group' && !mentioned) { inbound.groupSkipped += 1; return }
-      const text = stripMentions(msg.content ?? '')
+      const text = renderMentions(msg.content ?? '', resolveMention)
       const files = Array.isArray(msg.attachments) ? msg.attachments : []
       if (!text && files.length === 0) return
       lastMsg.set(target, { msgId: msg.messageId, at: Date.now(), count: 0 })
@@ -395,7 +448,7 @@ export async function apply(ctx, config = {}) {
     const parts = []
 
     const quote = state.quote
-    const quoteText = clip(stripMentions(quote?.text ?? ''), 300)
+    const quoteText = clip(renderMentions(quote?.text ?? '', resolveMention), 300)
     if (quoteText) {
       const who = quote?.entry?.senderName || quote?.entry?.senderId
       parts.push(`<reply_to>${who ? `${who}: ` : ''}${quoteText}</reply_to>`)
@@ -403,9 +456,16 @@ export async function apply(ctx, config = {}) {
 
     const history = Array.isArray(state.history) ? state.history : []
     if (historyLimit > 0 && history.length > 0) {
-      const rows = history.slice(-historyLimit)
-        .map(entry => `${entry.senderName || entry.senderId || 'unknown'}: ${clip(stripMentions(entry.content ?? ''), 200)}`)
-        .filter(row => row.length > 0)
+      const rows = []
+      for (const entry of history.slice(-historyLimit)) {
+        const raw = entry.content ?? ''
+        // A message that addressed the bot is already its own turn in the session.
+        const addressesBot = [...botMentionIds].some(id => raw.includes(`<@${id}>`) || raw.includes(`<@!${id}>`))
+        if (addressesBot) continue
+        const content = clip(renderMentions(raw, resolveMention), 200)
+        if (!content) continue
+        rows.push(`${entry.senderName || entry.senderId || 'unknown'}: ${content}`)
+      }
       if (rows.length > 0) parts.push(`<history>\n${rows.join('\n')}\n</history>`)
     }
 
