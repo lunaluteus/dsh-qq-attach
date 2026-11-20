@@ -17,7 +17,7 @@ import { downloadAttachment, sendMediaFile } from './lib/media.js'
 export const name = 'qq-attach'
 
 /** Bumped on every behavioural change; surfaced by the `status` endpoint. */
-const BUILD = '0.5.1-log-content'
+const BUILD = '0.6.0-quoted-attachments'
 export const inject = [
   'agents', 'sessions', 'sessionController', 'storageDomain', 'credentials',
   'webServer', 'systemPrompt', 'tools', 'sessionQuery', 'attachments',
@@ -174,6 +174,25 @@ export async function apply(ctx, config = {}) {
     return mentionNames.get(id)
   }
 
+  /**
+   * Attachment descriptors for messages that were not addressed to the bot. Those
+   * are never downloaded; the map only lets history and the log say what arrived.
+   */
+  const attachmentNotes = new Map()
+  const ATTACHMENT_NOTE_LIMIT = 200
+
+  const noteFor = (messageId) => attachmentNotes.get(messageId) ?? []
+
+  /** Human-readable placeholder for one attachment descriptor. */
+  const attachmentLabel = (item) => {
+    const name = item?.filename || item?.name || 'file'
+    const type = String(item?.content_type ?? item?.contentType ?? '')
+    if (type.startsWith('image/')) return `[image: ${name}]`
+    if (type.startsWith('video/')) return `[video: ${name}]`
+    if (type.startsWith('audio/') || type === 'voice') return `[voice: ${name}]`
+    return `[file: ${name}]`
+  }
+
   /** Gateway state from the SDK's own ready/disconnected events. */
   const link = { connected: false, readyAt: 0, disconnectedAt: 0, reason: null }
 
@@ -245,7 +264,11 @@ export async function apply(ctx, config = {}) {
       // then let the SDK decide whether this message addresses the bot. passthrough
       // keeps the chain alive for messages the gate rejects.
       created.use(historyBuffer({ limit: 50 }))
-      created.use(quoteRef())
+      created.use(quoteRef({
+        // The default store keeps text only, which loses an image quote on a cache
+        // hit. Keep the attachment descriptors so the image stays reachable.
+        enrichEntry: (entry, ctx) => ({ ...entry, attachments: ctx.message.attachments ?? [] }),
+      }))
       created.use(mentionGate({ passthrough: true, requireMentionInGroup: true }))
       created.on('ready', () => {
         link.connected = true
@@ -417,6 +440,13 @@ export async function apply(ctx, config = {}) {
       // Learn names before any gating: a skipped message may be the only place a
       // member's nickname appears.
       learnMentions(msg)
+      if (Array.isArray(msg.attachments) && msg.attachments.length > 0) {
+        attachmentNotes.set(msg.messageId, msg.attachments)
+        while (attachmentNotes.size > ATTACHMENT_NOTE_LIMIT) {
+          const oldest = attachmentNotes.keys().next().value
+          attachmentNotes.delete(oldest)
+        }
+      }
       const target = targetOf(msg)
       if (!target) return
       const att = attaches.get(target)
@@ -454,8 +484,9 @@ export async function apply(ctx, config = {}) {
 
       if (msg.kind === 'group' && !mentioned) {
         const shown = renderMentions(msg.content ?? '', resolveMention)
+        const placeholder = attachments.map(attachmentLabel).join(' ')
         logLine(att.sessionId, 'in', 'skipped',
-          `${detail.reason ?? 'not addressed'}: ${brief(shown) || '(no text)'}`, detail)
+          `${detail.reason ?? 'not addressed'}: ${brief(shown ? `${shown} ${placeholder}`.trim() : placeholder) || '(no text)'}`, detail)
         return
       }
 
@@ -467,12 +498,18 @@ export async function apply(ctx, config = {}) {
         logLine(att.sessionId, 'in', 'error', 'session is not available', detail)
         return
       }
-      const prefix = contextPrefix(messageCtx, msg)
+      const context = await contextPrefix(messageCtx, msg, att.sessionId)
+      const prefix = context.text
       logLine(att.sessionId, 'in', 'message', brief(text) || '(attachment only)', {
         ...detail,
-        context: prefix ? { quote: Boolean(messageCtx?.state?.quote), history: (messageCtx?.state?.history ?? []).length } : null,
+        context: {
+          quote: Boolean(messageCtx?.state?.quote),
+          history: (messageCtx?.state?.history ?? []).length,
+          quotedAttachments: context.blocks.length,
+        },
       })
       const content = await buildContent(prefix ? `${prefix}\n\n${text}` : text, attachments, att.sessionId)
+      if (context.blocks.length > 0) content.splice(Math.min(1, content.length), 0, ...context.blocks)
       if (content.length === 0) return
       const message = createUserMessage({ content, source: { kind: 'user' } })
       if (att.steer) agent.steer(message)
@@ -496,12 +533,53 @@ export async function apply(ctx, config = {}) {
    * when the sender replied to something, plus buffered group chatter. Only the
    * platform-pushed events are available; QQ exposes no history API.
    */
-  function contextPrefix(messageCtx, msg) {
+  /** Download the attachments of the quoted message into content blocks. */
+  async function ingestQuoted(descriptors, sessionId) {
+    const blocks = []
+    for (const item of descriptors) {
+      const url = item?.url
+      const name = item?.filename || item?.name || 'file'
+      const contentType = item?.contentType ?? item?.content_type
+      if (!url) continue
+      try {
+        const downloaded = await downloadAttachment(url, name, maxBytes)
+        const mediaType = mediaTypeOf(contentType, name)
+        if (mediaType && typeof ctx.attachments?.saveImage === 'function') {
+          const ref = await ctx.attachments.saveImage({ data: downloaded.data, mediaType, name: downloaded.name })
+          blocks.push({ type: 'image', attachment: ref })
+          logLine(sessionId, 'in', 'quote-attachment', `${name} → image (${downloaded.data.byteLength} B)`)
+        } else if (typeof ctx.attachments?.saveFile === 'function') {
+          const ref = await ctx.attachments.saveFile({ data: downloaded.data, name: downloaded.name })
+          blocks.push({ type: 'file', attachment: ref })
+          logLine(sessionId, 'in', 'quote-attachment', `${name} → file (${downloaded.data.byteLength} B)`)
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        logLine(sessionId, 'in', 'quote-attachment', `${name} → failed: ${reason}`)
+        blocks.push({ type: 'text', text: `[quoted attachment unavailable: ${name}]` })
+      }
+    }
+    return blocks
+  }
+
+  /**
+   * Context attached to one addressed message: the quoted message (with its own
+   * attachments), plus buffered group chatter as text only. Attachments of
+   * messages that did not address the bot are never downloaded.
+   */
+  async function contextPrefix(messageCtx, msg, sessionId) {
     const state = messageCtx?.state ?? {}
     const parts = []
+    const blocks = []
 
     const quote = state.quote
-    const quoteText = clip(renderMentions(quote?.text ?? '', resolveMention), 300)
+    const quoted = Array.isArray(quote?.attachments) && quote.attachments.length > 0
+      ? quote.attachments
+      : Array.isArray(quote?.entry?.attachments) ? quote.entry.attachments : []
+    blocks.push(...await ingestQuoted(quoted, sessionId))
+
+    let quoteText = clip(renderMentions(quote?.text ?? '', resolveMention), 300)
+    if (!quoteText && quoted.length > 0) quoteText = quoted.map(attachmentLabel).join(' ')
     if (quoteText) {
       const who = quote?.entry?.senderName || quote?.entry?.senderId
       parts.push(`<reply_to>${who ? `${who}: ` : ''}${quoteText}</reply_to>`)
@@ -515,16 +593,23 @@ export async function apply(ctx, config = {}) {
         // A message that addressed the bot is already its own turn in the session.
         const addressesBot = [...botMentionIds].some(id => raw.includes(`<@${id}>`) || raw.includes(`<@!${id}>`))
         if (addressesBot) continue
-        const content = clip(renderMentions(raw, resolveMention), 200)
+        const spoken = renderMentions(raw, resolveMention)
+        // Attachments of skipped messages are placeholders only: never downloaded.
+        const placeholder = noteFor(entry.messageId).map(attachmentLabel).join(' ')
+        const content = clip(spoken ? `${spoken} ${placeholder}`.trim() : placeholder, 200)
         if (!content) continue
         rows.push(`${entry.senderName || entry.senderId || 'unknown'}: ${content}`)
       }
       if (rows.length > 0) parts.push(`<history>\n${rows.join('\n')}\n</history>`)
     }
 
-    if (parts.length === 0) return ''
+    if (parts.length === 0 && blocks.length === 0) return { text: '', blocks: [] }
     const sender = msg.senderName || msg.senderId || 'unknown'
-    return `<qq_context>\nfrom: ${sender}\n${parts.join('\n')}\n</qq_context>`
+    const body = parts.join('\n')
+    return {
+      text: body ? `<qq_context>\nfrom: ${sender}\n${body}\n</qq_context>` : '',
+      blocks,
+    }
   }
 
   async function buildContent(text, attachments, sessionId) {
