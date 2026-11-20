@@ -25,12 +25,38 @@ This plugin does the reverse — it binds a **DSH session** to a QQ chat.
 
 ## Install & Setup
 
-TODO
+Needs DSH `0.2.2-rc.5` (declared in `engines.dsh`) and Node 22.19 or newer. You
+also need a QQ bot from the [QQ Open Platform](https://q.qq.com/), with the
+group and direct-message events enabled, and its AppID and AppSecret.
 
-### Getting a chat into the picker
+### Install the bundle
 
-The picker only lists chats the bot has already received something from. Send
-one message from that QQ chat to the bot first; it then appears in the dropdown.
+Paste one of these into **Settings → Plugins → add plugin**:
+
+```
+github:<owner>/<repo>
+```
+
+Doing development instead? Clone the repository and
+install its absolute path, which links the working copy so edits apply on reload:
+
+```
+/home/you/dsh-qq-attach
+```
+
+### Bind the bot
+
+Open **Settings → Plugins → dsh-qq-attach** and scan the QR code, or fill in
+AppID and AppSecret. Credentials go to the DSH credential store, so the bot
+reconnects by itself on later starts.
+
+### Attach a chat
+
+Open a conversation, switch to the **QQ attach** tab (you may need to say something to the bot first to see it), pick a chat and press Attach.
+
+The picker only lists chats the bot has already received something from, so send
+one message from that QQ chat first; until then paste the id by hand as
+`c2c:<openid>` or `group:<openid>`.
 
 ## Configuration
 
