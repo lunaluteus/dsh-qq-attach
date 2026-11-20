@@ -1,0 +1,7 @@
+# Dependencies are installed from pnpm-lock.yaml, never committed.
+node_modules/
+
+# Local scratch and diagnostic output.
+*.log
+*.tmp
+.DS_Store

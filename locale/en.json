@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "QQ attach",
+    "description": "Attach an open DSH session to one QQ chat: messages arrive from QQ, replies and files go back, and the agent can send proactively.",
+    "detail": "docs/DETAIL.md"
+  }
+}

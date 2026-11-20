@@ -1,0 +1,59 @@
+{
+  "name": "dsh-qq-attach",
+  "version": "0.1.0",
+  "description": "Attach an open DSH session to one QQ chat: inbound messages become user turns, replies and files flow back, and the agent can send proactively.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19",
+    "dsh": "0.2.2-rc.5"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "qq",
+    "qqbot",
+    "im",
+    "attach"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "docs",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
+    }
+  },
+  "dependencies": {
+    "@tencent-connect/qqbot-connector": "1.2.0",
+    "@tencent-connect/qqbot-nodejs": "1.0.5",
+    "qrcode": "1.5.4",
+    "zod": "4.6.6"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,5 @@
+# dsh-qq-attach: attach an open DSH session to one QQ chat.
+- insert:
+    - id: qq-attach
+      name: 'dsh-qq-attach'
+      config: {}
