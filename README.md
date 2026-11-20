@@ -32,19 +32,6 @@ TODO
 The picker only lists chats the bot has already received something from. Send
 one message from that QQ chat to the bot first; it then appears in the dropdown.
 
-## Switches
-
-| Switch | Default | Meaning |
-| --- | --- | --- |
-| Forward replies | on | Forward assistant text, and presented files at turn end |
-| Streaming | on | Stream into one message (private chats only) |
-| Forward tool results | off | One line for each successful tool call |
-| Forward errors | on | Tool failures and the turn-failure notice |
-| Steer while running | on | Steer the running turn; off queues the next one |
-
-The prompt override applies while **Forward replies** is off: it tells the agent
-that normal output is not delivered and that it must use `qq_send`.
-
 ## Configuration
 
 ```yaml
