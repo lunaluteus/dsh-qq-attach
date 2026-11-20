@@ -115,11 +115,6 @@ export async function apply(ctx, config = {}) {
   rebuild()
 
   /**
-   * Inbound diagnostics: whether the platform delivered a message, whether the
-   * gate treated it as addressed, and whether it reached a session. Exposed by
-   * the status endpoint because a dropped message leaves no other trace.
-   */
-  /**
    * Per-session QQ traffic log. The session trajectory already records what the
    * agent saw and did; this records what crossed the QQ boundary instead: raw
    * platform events, mention and attachment payloads, API calls and results.
@@ -239,8 +234,6 @@ export async function apply(ctx, config = {}) {
     m.count += 1
     return { ...parts, msgId: m.msgId }
   }
-  const active = (target) => ({ ...parseTarget(target) })
-
   async function sendText(target, text) {
     const b = await botInstance()
     if (!b) throw new Error('QQ bot is not configured')
@@ -553,12 +546,6 @@ export async function apply(ctx, config = {}) {
     }
   }
 
-  /** Truncate one line of context without cutting a surrogate pair. */
-  const clip = (text, max) => {
-    const flat = String(text ?? '').replace(/\s+/g, ' ').trim()
-    return flat.length > max ? `${flat.slice(0, max)}…` : flat
-  }
-
   /**
    * Context the QQ platform attaches to one inbound message: the quoted message
    * when the sender replied to something, plus buffered group chatter. Only the
@@ -609,7 +596,7 @@ export async function apply(ctx, config = {}) {
       : Array.isArray(quote?.entry?.attachments) ? quote.entry.attachments : []
     blocks.push(...await ingestQuoted(quoted, sessionId))
 
-    let quoteText = clip(renderMentions(quote?.text ?? '', resolveMention), 300)
+    let quoteText = brief(renderMentions(quote?.text ?? '', resolveMention), 300)
     if (!quoteText && quoted.length > 0) quoteText = quoted.map(attachmentLabel).join(' ')
     if (quoteText) {
       const who = quote?.entry?.senderName || quote?.entry?.senderId
@@ -627,7 +614,7 @@ export async function apply(ctx, config = {}) {
         const spoken = renderMentions(raw, resolveMention)
         // Attachments of skipped messages are placeholders only: never downloaded.
         const placeholder = noteFor(entry.messageId).map(attachmentLabel).join(' ')
-        const content = clip(spoken ? `${spoken} ${placeholder}`.trim() : placeholder, 200)
+        const content = brief(spoken ? `${spoken} ${placeholder}`.trim() : placeholder, 200)
         if (!content) continue
         rows.push(`${entry.senderName || entry.senderId || 'unknown'}: ${content}`)
       }

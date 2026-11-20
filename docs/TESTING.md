@@ -20,13 +20,15 @@ verified against a real QQ account, and what still needs a manual pass.
 | QQ log panel | Records inbound, outbound, attachments and gateway events |
 | Attach persistence | Survives repeated plugin reloads without re-binding |
 | Gateway state | `link.connected` follows the SDK's ready/disconnected events |
+| Presented files | `present` output arrives at turn end when automatic replies are on |
+| Archived sessions | Inbound is dropped with `in error` and no turn runs |
+| Chat takeover | Attaching a busy chat asks for confirmation; the old session is detached and logged |
 
 ## Not yet verified
 
 | Area | How to test |
 | --- | --- |
 | Streaming replies | Enable streaming in a direct chat and confirm one message updates in place |
-| `deliverables/presented` | With automatic replies on, have the agent present a file; it should send at turn end |
 | Long message chunking | Produce a reply over 4500 characters; QQ should receive several parts |
 | Passive reply budget | Reply more than four times to one message; later replies must fall back to active messages |
 | Media TTL cleanup | Set `media.ttlHours` low and confirm old files disappear under `~/.dsh-qqbot/media` |

@@ -1,46 +1,55 @@
 # dsh-qq-attach
 
-Attach one open DSH session to one QQ chat.
+Attach one open DSH session to one QQ chat, so an agent you are already working
+with also talks to you on QQ.
 
-This bundle replaces the old always-on QQ session bot: there are no QQ-side
-commands, menus, approvals, or per-peer sessions. A conversation is attached
-explicitly from DSH, and only the attached chat is bridged.
+## How this differs from the QQ bot SDK
 
-## What it does
+The official SDK hands you a bot: you register a message handler and keep your
+own state. This plugin does the reverse — it binds a **DSH session** to a chat.
 
-- QQ messages enter the attached DSH session as user turns. Private chats take
-  all text; group chats take only messages that mention the bot.
-- Assistant text is forwarded to QQ while **Forward replies** is on. Presented
-  files follow the same switch.
-- `qq_send` and `qq_send_file` are registered only on attached sessions, so the
-  agent can send proactively even when automatic replies are off.
-- Images from QQ are stored through the attachment service and delivered to the
-  model as image blocks; other attachments become file blocks. Voice messages
-  keep QQ's transcription text when present.
-- Media files live in `~/.dsh-qqbot/media` and expire after `media.ttlHours`.
+- **The session is the bot.** A QQ message becomes a user turn in that session,
+  so it keeps the agent's context, tools, files and memory. Nothing is mirrored.
+- **Two reply modes.**
+  - *Automatic replies* (default): everything the agent says is forwarded, and
+    files it presents with `present` are sent when the turn ends.
+  - *Proactive only* (`autoReply` off): normal output stays in the session and
+    the agent must call `qq_send` / `qq_send_file`. This is the mode for long
+    jobs where it should only report now and then.
+- **Group chats need an @.** Messages that do not mention the bot are kept as
+  context only: the last few reach the agent as `<history>`, never as turns, and
+  their attachments stay `[image: name]` placeholders. A message that does
+  address the bot downloads its own attachments and anything it quotes.
+- **Settings belong to the attachment.** Reply mode, streaming, forwarding,
+  steering and a prompt override are per session, not global.
+- **The panel shows the QQ boundary.** Raw inbound events, mentions,
+  attachments, every outbound call and gateway state — none of which the
+  session trajectory records.
 
-## Use
+## Install
 
-1. Install the bundle, then open **Settings → QQ attach**.
-2. Scan the QR code or enter the AppID and AppSecret.
-3. Open any conversation, switch to the **QQ attach** tab, pick a chat the bot
-   has seen or paste `c2c:<openid>` / `group:<openid>`, and attach.
-4. Send a QQ message; reply in DSH or let the agent call `qq_send`.
+TODO
 
-The settings page lists every attachment; clicking a row opens its conversation
-on the QQ attach tab.
+## Getting a chat into the picker
 
-## Per-attachment switches
+The picker only lists chats the bot has already received something from. Send
+one message from that QQ chat to the bot first; it then appears in the dropdown.
+Until then, paste the id by hand: `c2c:<openid>` or `group:<openid>`.
+
+## Switches
 
 | Switch | Default | Meaning |
 | --- | --- | --- |
-| Forward replies | on | Forward assistant text; presented files too |
+| Forward replies | on | Forward assistant text, and presented files at turn end |
 | Streaming | on | Stream into one message (private chats only) |
-| Forward tool results | off | Send a one-line note for each successful tool call |
-| Forward errors | on | Send tool failures and the turn failure notice |
-| Steer while running | on | Steer a running turn; off queues the next turn |
+| Forward tool results | off | One line for each successful tool call |
+| Forward errors | on | Tool failures and the turn-failure notice |
+| Steer while running | on | Steer the running turn; off queues the next one |
 
-## Config
+The prompt override applies while **Forward replies** is off: it tells the agent
+that normal output is not delivered and that it must use `qq_send`.
+
+## Configuration
 
 ```yaml
 - id: qq-attach
@@ -52,31 +61,33 @@ on the QQ attach tab.
       ttlHours: 24
     sendFile:
       maxFiles: 4
+    group:
+      historyLimit: 8
 ```
 
-## Limitations
+`media.ttlHours` only clears the download staging area in `~/.dsh-qqbot/media`.
+Images already used in a session live in the DSH attachment store, which never
+deletes them.
 
-- One bot; one chat per session; a chat must be detached before it can be
-  attached elsewhere.
+## Limits
+
+- One bot, and one session per chat. Taking over a chat that an active session
+  holds asks for confirmation first.
 - Only root sessions attach; subagent sessions are refused.
-- No QQ-side commands, approvals, questions, group history, or quoting.
-- File sending is limited to the session working directory and the media
-  directory.
-- The local HTTP route under `/qq-attach` has no additional authentication;
-  keep the Web host on a trusted interface.
+- An archived session is not fed: its messages are dropped with a log line.
+- Files can be sent from the session working directory or the media directory.
+- The local `/qq-attach` route has no extra authentication; keep the Web host on
+  a trusted interface.
 
 ## Development
 
 Dependencies come from the lockfile: `pnpm install`.
 
-The sources are plain JavaScript; `tsc` checks them in place with `checkJs`,
-which reports undefined names, misspelled properties and wrong argument counts
-without a build step:
+The sources are plain JavaScript; `tsc` checks them in place with `checkJs`:
 
 ```sh
 pnpm typecheck
 ```
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/):
-`<type>(<scope>)?: <subject>`, where type is one of `feat`, `fix`, `docs`,
-`style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`.
+`<type>(<scope>)?: <subject>`.

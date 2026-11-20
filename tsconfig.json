@@ -16,7 +16,8 @@
     "skipLibCheck": true,
     "strict": false,
     "noImplicitAny": false,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    "noUnusedLocals": true
   },
   "include": [
     "index.js",
