@@ -1,7 +1,6 @@
 {
   "meta": {
     "title": "QQ 会话绑定",
-    "description": "把一个打开的 DSH 会话绑定到一个 QQ 聊天：QQ 消息进入会话，回复和文件回到 QQ，Agent 也可以主动发送。",
-    "detail": "docs/DETAIL.md"
+    "description": "把一个打开的 DSH 会话绑定到一个 QQ 聊天：QQ 消息进入会话，回复和文件回到 QQ，Agent 也可以主动发送。"
   }
 }
