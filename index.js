@@ -17,7 +17,7 @@ import { downloadAttachment, sendMediaFile } from './lib/media.js'
 export const name = 'qq-attach'
 
 /** Bumped on every behavioural change; surfaced by the `status` endpoint. */
-const BUILD = '0.6.3-log-coverage-2'
+const BUILD = '0.7.0-mode-tools'
 export const inject = [
   'agents', 'sessions', 'sessionController', 'storageDomain', 'credentials',
   'webServer', 'systemPrompt', 'tools', 'sessionQuery', 'attachments',
@@ -402,14 +402,35 @@ export async function apply(ctx, config = {}) {
     }
   }
 
+  /**
+   * QQ tools exist only while automatic replies are off. When replies are forwarded
+   * automatically the files travel through `present`, so exposing qq_send and
+   * qq_send_file as well would give the agent two ways to reach the same chat.
+   */
+  function syncTools(agent, runtime) {
+    const att = bySession.get(agent.id)
+    const want = att !== undefined && att.autoReply === false
+    const had = runtime.tools !== undefined
+    if (want && !had) {
+      runtime.tools = [
+        agent.ctx.tools.register(qqSend),
+        agent.ctx.tools.register(qqSendFile),
+      ]
+      logLine(agent.id, 'sys', 'tools', 'qq_send and qq_send_file enabled')
+    } else if (!want && had) {
+      for (const dispose of runtime.tools) { try { dispose() } catch {} }
+      runtime.tools = undefined
+      logLine(agent.id, 'sys', 'tools', 'qq_send and qq_send_file disabled')
+    }
+  }
+
   function ensureRuntime(agent) {
     let runtime = runtimes.get(agent.id)
     if (!runtime) {
-      runtime = { disposers: [] }
-      runtime.disposers.push(agent.ctx.tools.register(qqSend))
-      runtime.disposers.push(agent.ctx.tools.register(qqSendFile))
+      runtime = {}
       runtimes.set(agent.id, runtime)
     }
+    syncTools(agent, runtime)
     syncPrompt(agent, runtime)
     return runtime
   }
@@ -419,7 +440,7 @@ export async function apply(ctx, config = {}) {
     if (!runtime) return
     runtimes.delete(sessionId)
     try { runtime.prompt?.() } catch {}
-    for (const dispose of runtime.disposers) { try { dispose() } catch {} }
+    if (runtime.tools !== undefined) for (const dispose of runtime.tools) { try { dispose() } catch {} }
   }
 
   async function ensureAgent(sessionId) {
