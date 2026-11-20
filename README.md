@@ -71,9 +71,4 @@ Dependencies come from the lockfile: `pnpm install`.
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/):
 `<type>(<scope>)?: <subject>`, where type is one of `feat`, `fix`, `docs`,
-`style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`. The
-bundled hook rejects anything else, so enable it once per clone:
-
-```sh
-git config core.hooksPath .githooks
-```
+`style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`.
