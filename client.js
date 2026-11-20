@@ -22,6 +22,7 @@ window.__ModuleLoader__.load({
       attachedTo: 'Attached to another session',
       attachedToActive: 'attached to an active session',
       attachedToArchived: 'attached to an archived session',
+      archived: 'archived',
       attachBusy: 'is already attached to an active session. Attaching it here detaches that session.',
       attachAnyway: 'Attach anyway',
       cancel: 'Cancel',
@@ -71,6 +72,7 @@ window.__ModuleLoader__.load({
       attachedTo: '已绑定到其他会话',
       attachedToActive: '已挂载到活跃会话',
       attachedToArchived: '已挂载到已归档会话',
+      archived: '已归档',
       attachBusy: '已挂载到一个活跃会话。在此挂载会将该会话解挂。',
       attachAnyway: '仍要挂载',
       cancel: '取消',
@@ -525,16 +527,24 @@ window.__ModuleLoader__.load({
         h('div', { style: { fontWeight: 600 } }, t('nav')),
         list.length === 0
           ? h('div', { style: styles.muted }, t('noAttaches'))
-          : list.map(item => h('div', {
-              key: item.target,
-              style: styles.listRow,
-              onClick: () => { openAttach(item.sessionId); try { close?.() } catch {} },
-            },
-              h('div', { style: { display: 'flex', flexDirection: 'column', flex: '1', minWidth: 0 } },
-                h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-                  titleText(item)),
-                h('span', { style: styles.muted }, item.target)),
-              h('span', { style: styles.muted }, t('open')))))
+          : list.map(item => {
+              // An archived session cannot run a turn, so its row is inert rather than
+              // a shortcut into a conversation that would answer nothing.
+              const disabled = item.archived === true
+              return h('div', {
+                key: item.target,
+                'aria-disabled': disabled || undefined,
+                style: {
+                  ...styles.listRow,
+                  ...(disabled ? { opacity: 0.45, cursor: 'default' } : {}),
+                },
+                onClick: disabled ? undefined : () => { openAttach(item.sessionId); try { close?.() } catch {} },
+              },
+                h('div', { style: { display: 'flex', flexDirection: 'column', flex: '1', minWidth: 0 } },
+                  h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, titleText(item)),
+                  h('span', { style: styles.muted }, item.target)),
+                h('span', { style: styles.muted }, disabled ? t('archived') : t('open')))
+            }))
 
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', padding: '8px 0' } }, account, attaches)
     }

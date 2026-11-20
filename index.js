@@ -17,7 +17,7 @@ import { downloadAttachment, sendMediaFile } from './lib/media.js'
 export const name = 'qq-attach'
 
 /** Bumped on every behavioural change; surfaced by the `status` endpoint. */
-const BUILD = '0.8.1-takeover-fixes'
+const BUILD = '0.8.3-archived-disabled'
 
 export const inject = [
   'agents', 'sessions', 'sessionController', 'storageDomain', 'credentials',
@@ -898,7 +898,7 @@ export async function apply(ctx, config = {}) {
     for (const [target, value] of attaches.entries()) {
       let title
       try { title = await ctx.sessionQuery.readTitle(value.sessionId) } catch {}
-      rows.push({ target, ...value, title })
+      rows.push({ target, ...value, title, archived: isArchived(value.sessionId) })
     }
     rows.sort((a, b) => b.createdAt - a.createdAt)
     return rows
