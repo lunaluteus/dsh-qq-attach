@@ -45,6 +45,9 @@ window.__ModuleLoader__.load({
       prompt: 'Prompt',
       promptHint: 'Injected while automatic replies are off, telling the agent what must be sent with qq_send. Save an empty value to restore the default.',
       resetDefault: 'Reset to default',
+      log: 'QQ log',
+      logClear: 'Clear',
+      logEmpty: 'No QQ traffic yet',
       promptSaved: 'Saved',
       promptRestored: 'Restored the default prompt',
       promptCustom: 'Custom for this session',
@@ -85,6 +88,9 @@ window.__ModuleLoader__.load({
       prompt: '提示词',
       promptHint: '自动转发关闭时注入给会话的提示词，用来告诉 agent 哪些内容必须通过 qq_send 发出。留空并保存即恢复默认。',
       resetDefault: '恢复默认',
+      log: 'QQ 日志',
+      logClear: '清空',
+      logEmpty: '还没有 QQ 收发记录',
       promptSaved: '已保存',
       promptRestored: '已恢复默认提示词',
       promptCustom: '本会话使用自定义',
@@ -194,6 +200,7 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = useState(undefined)
       const [feedback, setFeedback] = useState(null)
       const [focused, setFocused] = useState(false)
+      const [logLines, setLogLines] = useState([])
 
       const notify = (message) => setFeedback({ message, at: Date.now() })
 
@@ -242,6 +249,25 @@ window.__ModuleLoader__.load({
         notify(t('promptRestored'))
       }
 
+      // Poll the host's QQ traffic log while this session is attached.
+      const attachedTarget = state.attach?.target
+      useEffect(() => {
+        if (attachedTarget === undefined) { setLogLines([]); return }
+        let cancelled = false
+        const load = () => {
+          call('log.list', { sessionId })
+            .then(lines => { if (!cancelled) setLogLines(lines) })
+            .catch(() => {})
+        }
+        load()
+        const timer = setInterval(load, 2000)
+        return () => { cancelled = true; clearInterval(timer) }
+      }, [sessionId, attachedTarget])
+
+      const clearLog = async () => {
+        try { await call('log.clear', { sessionId }); setLogLines([]) } catch {}
+      }
+
       useEffect(() => {
         if (feedback === null) return
         const timer = setTimeout(() => setFeedback(null), 2500)
@@ -284,7 +310,7 @@ window.__ModuleLoader__.load({
       const effective = attach.prompt || String(attach.defaultPrompt ?? '')
       const dirty = draft !== undefined && draft.trim() !== String(effective).trim()
 
-      return h('div', { style: styles.card },
+      const settingsCard = h('div', { style: { ...styles.card, flex: '1 1 320px', minWidth: 0 } },
         h('div', { style: styles.row },
           h('span', { style: styles.muted }, t('bound')),
           h('strong', { style: styles.label }, attach.target),
@@ -334,6 +360,42 @@ window.__ModuleLoader__.load({
               feedback ? h('span', { style: { ...styles.muted, fontWeight: 600 } }, `✓ ${feedback.message}`) : null)
           : null,
         error ? h('div', { style: styles.error }, error) : null)
+
+      const logCard = h('div', { style: { ...styles.card, flex: '1 1 380px', minWidth: 0 } },
+        h('div', { style: styles.row },
+          h('span', { style: { fontWeight: 600 } }, t('log')),
+          h('span', { style: styles.label }),
+          h('button', { style: styles.button, disabled: busy, onClick: clearLog }, t('logClear'))),
+        h('div', {
+          style: {
+            maxHeight: '420px',
+            overflowY: 'auto',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '3px',
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+            fontSize: '11px',
+            lineHeight: 1.45,
+          },
+        },
+          logLines.length === 0
+            ? h('div', { style: styles.muted }, t('logEmpty'))
+            : logLines.map((line, index) => h('div', {
+                key: `${line.at}-${index}`,
+                title: line.detail === undefined
+                  ? line.text
+                  : `${line.text}\n\n${JSON.stringify(line.detail, null, 2)}`.slice(0, 2000),
+                style: { display: 'flex', gap: '6px', alignItems: 'baseline' },
+              },
+                h('span', { style: { color: 'var(--dsw-alias-label-tertiary)', flex: 'none' } },
+                  new Date(line.at).toLocaleTimeString()),
+                h('span', { style: { flex: 'none', width: '10px', color: 'var(--dsw-alias-label-secondary)' } },
+                  line.dir === 'in' ? '←' : line.dir === 'out' ? '→' : '·'),
+                h('span', { style: { wordBreak: 'break-word' } }, `${line.event}: ${line.text}`)))))
+
+      return h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'flex-start' } },
+        settingsCard,
+        logCard)
     }
 
     function SettingsSection(injected) {

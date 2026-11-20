@@ -17,7 +17,7 @@ import { downloadAttachment, sendMediaFile } from './lib/media.js'
 export const name = 'qq-attach'
 
 /** Bumped on every behavioural change; surfaced by the `status` endpoint. */
-const BUILD = '0.4.0-mention-names'
+const BUILD = '0.5.1-log-content'
 export const inject = [
   'agents', 'sessions', 'sessionController', 'storageDomain', 'credentials',
   'webServer', 'systemPrompt', 'tools', 'sessionQuery', 'attachments',
@@ -114,7 +114,39 @@ export async function apply(ctx, config = {}) {
    * gate treated it as addressed, and whether it reached a session. Exposed by
    * the status endpoint because a dropped message leaves no other trace.
    */
-  const inbound = { total: 0, group: 0, groupSkipped: 0, delivered: 0, failed: 0, last: null, byEvent: {}, recent: [] }
+  /**
+   * Per-session QQ traffic log. The session trajectory already records what the
+   * agent saw and did; this records what crossed the QQ boundary instead: raw
+   * platform events, mention and attachment payloads, API calls and results.
+   */
+  const logs = new Map()
+  const LOG_LIMIT = 400
+
+  /** Collapse one value to a single log line, keeping the head of long content. */
+  const brief = (value, max = 240) => {
+    const flat = String(value ?? '').replace(/\s+/g, ' ').trim()
+    return flat.length > max ? `${flat.slice(0, max)}…` : flat
+  }
+
+  /** Append one line to a session's log, oldest entries dropped first. */
+  const logLine = (sessionId, dir, event, text, detail) => {
+    if (!sessionId) return
+    const list = logs.get(sessionId) ?? []
+    list.push({
+      at: Date.now(),
+      dir,
+      event,
+      text: String(text ?? ''),
+      ...(detail === undefined ? {} : { detail }),
+    })
+    if (list.length > LOG_LIMIT) list.splice(0, list.length - LOG_LIMIT)
+    logs.set(sessionId, list)
+  }
+
+  /** Bot-wide events belong to every session that is currently attached. */
+  const logAll = (dir, event, text) => {
+    for (const sessionId of bySession.keys()) logLine(sessionId, dir, event, text)
+  }
 
   /**
    * Mention id to readable handle. QQ identifies mentions by opaque openid, so the
@@ -215,11 +247,17 @@ export async function apply(ctx, config = {}) {
       created.use(historyBuffer({ limit: 50 }))
       created.use(quoteRef())
       created.use(mentionGate({ passthrough: true, requireMentionInGroup: true }))
-      created.on('ready', () => { link.connected = true; link.readyAt = Date.now(); link.reason = null })
+      created.on('ready', () => {
+        link.connected = true
+        link.readyAt = Date.now()
+        link.reason = null
+        logAll('sys', 'link', 'gateway ready')
+      })
       created.on('disconnected', (event) => {
         link.connected = false
         link.disconnectedAt = Date.now()
         link.reason = event?.reason ?? event?.code ?? 'disconnected'
+        logAll('sys', 'link', `gateway disconnected: ${link.reason}`)
       })
       created.on('message', (messageCtx, message) => { void onInbound(messageCtx, message) })
       // SDK start() is a long-lived promise: it never resolves while connected and
@@ -275,7 +313,13 @@ export async function apply(ctx, config = {}) {
       if (!att) throw new Error('this session is not attached to a QQ chat')
       const text = String(args?.text ?? '')
       if (!text.trim()) throw new Error('text must not be empty')
-      await sendText(att.target, text)
+      try {
+        await sendText(att.target, text)
+        logLine(att.sessionId, 'out', 'qq_send', text)
+      } catch (error) {
+        logLine(att.sessionId, 'out', 'qq_send', `failed: ${error instanceof Error ? error.message : error}`)
+        throw error
+      }
       return { sent: true, target: att.target }
     },
   }
@@ -310,8 +354,15 @@ export async function apply(ctx, config = {}) {
       const b = await botInstance()
       if (!b) throw new Error('QQ bot is not configured')
       const result = await sendMediaFile(b, passive(att.target), path)
-      if (result.outcome === 'missing') throw new Error('file does not exist')
-      if (result.outcome === 'failed') throw new Error(result.error)
+      if (result.outcome === 'missing') {
+        logLine(att.sessionId, 'out', 'qq_send_file', `missing: ${path}`)
+        throw new Error('file does not exist')
+      }
+      if (result.outcome === 'failed') {
+        logLine(att.sessionId, 'out', 'qq_send_file', `failed: ${path} — ${result.error}`)
+        throw new Error(result.error)
+      }
+      logLine(att.sessionId, 'out', 'qq_send_file', `${path} (${result.size} B)`)
       return { sent: true, target: att.target, file: path }
     },
   }
@@ -362,30 +413,6 @@ export async function apply(ctx, config = {}) {
   async function onInbound(messageCtx, msg) {
     try {
       if (msg.kind !== 'c2c' && msg.kind !== 'group') return
-      inbound.total += 1
-      if (msg.kind === 'group') inbound.group += 1
-      // Event-type tally plus a short ring of recent arrivals: a platform that
-      // flushes missed group messages on the next mention would show up here as
-      // several entries in a burst.
-      const eventType = msg.rawEventType ?? 'unknown'
-      inbound.byEvent[eventType] = (inbound.byEvent[eventType] ?? 0) + 1
-      inbound.recent = [...inbound.recent, {
-        at: Date.now(),
-        event: eventType,
-        kind: msg.kind,
-        text: String(msg.content ?? '').slice(0, 30),
-        // What the platform actually ships in `mentions`, for deciding how to
-        // render addresses: which ids resolve to names, and whether the bot's own
-        // entry is distinguishable.
-        mentions: Array.isArray(msg.mentions)
-          ? msg.mentions.slice(0, 3).map(mention => ({
-              is_you: mention?.is_you,
-              bot: mention?.bot,
-              nickname: mention?.nickname,
-              id: String(mention?.member_openid ?? mention?.user_openid ?? mention?.id ?? '').slice(0, 8),
-            }))
-          : null,
-      }].slice(-8)
       if (msg.senderIsBot) return
       // Learn names before any gating: a skipped message may be the only place a
       // member's nickname appears.
@@ -394,6 +421,7 @@ export async function apply(ctx, config = {}) {
       if (!target) return
       const att = attaches.get(target)
       if (!att) { await rememberChat(target, msg.kind); return }
+
       // The SDK gate already covers the event type, the structured mention list and
       // the content fallback; the inline check stays only as a safety net.
       const decision = messageCtx?.state?.mention
@@ -401,33 +429,58 @@ export async function apply(ctx, config = {}) {
         ? decision.shouldAnswer
         : msg.rawEventType === 'GROUP_AT_MESSAGE_CREATE'
           || msg.mentions?.some(mention => mention?.is_you === true)
-      inbound.last = {
-        at: Date.now(),
-        kind: msg.kind,
-        event: msg.rawEventType ?? null,
+
+      const attachments = Array.isArray(msg.attachments) ? msg.attachments : []
+      const detail = {
+        event: msg.rawEventType ?? 'unknown',
+        sender: msg.senderName || msg.senderId,
+        raw: String(msg.content ?? '').slice(0, 300),
         addressed: mentioned,
-        text: String(msg.content ?? '').slice(0, 40),
+        reason: decision?.reason,
+        mentions: Array.isArray(msg.mentions)
+          ? msg.mentions.map(mention => ({
+              is_you: mention?.is_you,
+              scope: mention?.scope,
+              nickname: mention?.nickname,
+            }))
+          : null,
+        attachments: attachments.map(item => ({
+          type: item?.content_type,
+          name: item?.filename,
+          size: item?.size,
+        })),
         elements: Array.isArray(msg.msgElements) ? msg.msgElements.length : 0,
-        scene: Array.isArray(msg.messageScene?.ext) ? msg.messageScene.ext.slice(0, 4) : undefined,
       }
-      if (msg.kind === 'group' && !mentioned) { inbound.groupSkipped += 1; return }
+
+      if (msg.kind === 'group' && !mentioned) {
+        const shown = renderMentions(msg.content ?? '', resolveMention)
+        logLine(att.sessionId, 'in', 'skipped',
+          `${detail.reason ?? 'not addressed'}: ${brief(shown) || '(no text)'}`, detail)
+        return
+      }
+
       const text = renderMentions(msg.content ?? '', resolveMention)
-      const files = Array.isArray(msg.attachments) ? msg.attachments : []
-      if (!text && files.length === 0) return
+      if (!text && attachments.length === 0) return
       lastMsg.set(target, { msgId: msg.messageId, at: Date.now(), count: 0 })
       const agent = await ensureAgent(att.sessionId)
-      if (!agent) return
+      if (!agent) {
+        logLine(att.sessionId, 'in', 'error', 'session is not available', detail)
+        return
+      }
       const prefix = contextPrefix(messageCtx, msg)
-      const content = await buildContent(prefix ? `${prefix}\n\n${text}` : text, files)
+      logLine(att.sessionId, 'in', 'message', brief(text) || '(attachment only)', {
+        ...detail,
+        context: prefix ? { quote: Boolean(messageCtx?.state?.quote), history: (messageCtx?.state?.history ?? []).length } : null,
+      })
+      const content = await buildContent(prefix ? `${prefix}\n\n${text}` : text, attachments, att.sessionId)
       if (content.length === 0) return
       const message = createUserMessage({ content, source: { kind: 'user' } })
       if (att.steer) agent.steer(message)
       else agent.followup(message)
-      inbound.delivered += 1
       try { await ctx.sessions.flush?.(agent.session) } catch {}
     } catch (error) {
-      inbound.failed += 1
-      inbound.error = String(error instanceof Error ? (error.stack ?? error.message) : error).slice(0, 400)
+      logLine(attaches.get(targetOf(msg))?.sessionId, 'in', 'error',
+        String(error instanceof Error ? error.message : error).slice(0, 300))
       log.warn(`qq-attach: inbound failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
@@ -474,7 +527,7 @@ export async function apply(ctx, config = {}) {
     return `<qq_context>\nfrom: ${sender}\n${parts.join('\n')}\n</qq_context>`
   }
 
-  async function buildContent(text, attachments) {
+  async function buildContent(text, attachments, sessionId) {
     const content = []
     if (text) content.push({ type: 'text', text })
     if (!mediaEnabled || attachments.length === 0) return content
@@ -487,12 +540,18 @@ export async function apply(ctx, config = {}) {
         if (mediaType && typeof ctx.attachments?.saveImage === 'function') {
           const ref = await ctx.attachments.saveImage({ data: downloaded.data, mediaType, name: downloaded.name })
           content.push({ type: 'image', attachment: ref })
+          logLine(sessionId, 'in', 'attachment', `${name} → image (${downloaded.data.byteLength} B, ${mediaType})`)
         } else if (typeof ctx.attachments?.saveFile === 'function') {
           const ref = await ctx.attachments.saveFile({ data: downloaded.data, name: downloaded.name })
           content.push({ type: 'file', attachment: ref })
+          logLine(sessionId, 'in', 'attachment', `${name} → file (${downloaded.data.byteLength} B)`)
+        } else {
+          logLine(sessionId, 'in', 'attachment', `${name} → dropped (no attachment service)`)
         }
       } catch (error) {
-        log.warn(`qq-attach: attachment skipped: ${error instanceof Error ? error.message : String(error)}`)
+        const reason = error instanceof Error ? error.message : String(error)
+        logLine(sessionId, 'in', 'attachment', `${name} → failed: ${reason}`)
+        log.warn(`qq-attach: attachment skipped: ${reason}`)
       }
     }
     return content
@@ -551,10 +610,15 @@ export async function apply(ctx, config = {}) {
       return
     }
     streams.delete(att.target)
-    if (att.autoReply && text) {
-      try { await sendText(att.target, text) } catch (error) {
-        log.warn(`qq-attach: send failed: ${error instanceof Error ? error.message : String(error)}`)
-      }
+    if (!att.autoReply) return
+    if (!text) return
+    try {
+      await sendText(att.target, text)
+      logLine(att.sessionId, 'out', 'reply', text)
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      logLine(att.sessionId, 'out', 'reply', `failed: ${reason}`)
+      log.warn(`qq-attach: send failed: ${reason}`)
     }
   }
 
@@ -698,7 +762,7 @@ export async function apply(ctx, config = {}) {
       case 'status': {
         const saved = account.get('main')
         const hasSecret = Boolean(await readSecret())
-        return { build: BUILD, bound: Boolean(saved?.appId), appId: saved?.appId, running: Boolean(bot), hasSecret, error: botError ?? null, inbound: { ...inbound }, link: { ...link } }
+        return { build: BUILD, bound: Boolean(saved?.appId), appId: saved?.appId, running: Boolean(bot), hasSecret, error: botError ?? null, link: { ...link } }
       }
       case 'bind.start': return startBind()
       case 'bind.state': return bindState
@@ -723,6 +787,11 @@ export async function apply(ctx, config = {}) {
       }
       case 'attach.get': return attachOf(String(payload.sessionId ?? ''))
       case 'attach.list': return listAttaches()
+      case 'log.list': return logs.get(String(payload.sessionId ?? '')) ?? []
+      case 'log.clear': {
+        logs.delete(String(payload.sessionId ?? ''))
+        return { cleared: true }
+      }
       case 'attach.set': {
         const sessionId = String(payload.sessionId ?? '')
         const target = String(payload.target ?? '')
