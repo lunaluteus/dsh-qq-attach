@@ -314,7 +314,7 @@ window.__ModuleLoader__.load({
             h('select', {
               style: styles.input,
               defaultValue: '',
-              onChange: event => { if (event.target.value) setManual(event.target.value) },
+              onChange: event => { if (event.target.value) { setManual(event.target.value); setPendingSteal(null) } },
             }, h('option', { value: '' }, t('select')), ...options)),
           h('div', { style: styles.row },
             h('input', {

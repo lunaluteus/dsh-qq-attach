@@ -17,7 +17,7 @@ import { downloadAttachment, sendMediaFile } from './lib/media.js'
 export const name = 'qq-attach'
 
 /** Bumped on every behavioural change; surfaced by the `status` endpoint. */
-const BUILD = '0.8.0-takeover'
+const BUILD = '0.8.1-takeover-fixes'
 
 export const inject = [
   'agents', 'sessions', 'sessionController', 'storageDomain', 'credentials',
@@ -958,6 +958,7 @@ export async function apply(ctx, config = {}) {
           if (payload.steal !== true) throw new Error('this chat is attached to another session')
           // Takeover is explicit: the previous session loses the chat and its tools.
           await attaches.delete(target)
+          cancelStream(target)
           disposeRuntime(holder.sessionId)
           logLine(holder.sessionId, 'sys', 'attach', `detached: the chat was claimed by ${sessionId}`)
         }
