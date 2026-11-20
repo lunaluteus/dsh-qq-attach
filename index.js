@@ -17,7 +17,7 @@ import { downloadAttachment, sendMediaFile } from './lib/media.js'
 export const name = 'qq-attach'
 
 /** Bumped on every behavioural change; surfaced by the `status` endpoint. */
-const BUILD = '0.6.0-quoted-attachments'
+const BUILD = '0.6.3-log-coverage-2'
 export const inject = [
   'agents', 'sessions', 'sessionController', 'storageDomain', 'credentials',
   'webServer', 'systemPrompt', 'tools', 'sessionQuery', 'attachments',
@@ -287,6 +287,7 @@ export async function apply(ctx, config = {}) {
       // rejects only when the gateway gives up. Do not await it.
       created.start().catch((error) => {
         botError = error instanceof Error ? error.message : String(error)
+        logAll('sys', 'error', `bot stopped: ${botError}`)
         log.warn(`qq-attach: bot stopped: ${botError}`)
         if (bot === created) bot = undefined
       })
@@ -667,7 +668,12 @@ export async function apply(ctx, config = {}) {
       try {
         const parts = parseTarget(att.target)
         state.session = bot.openStream({ target: { ...parts, msgId: last.msgId } })
-      } catch { streams.delete(att.target); return }
+        logLine(att.sessionId, 'out', 'stream', 'started')
+      } catch (error) {
+        logLine(att.sessionId, 'out', 'stream', `open failed: ${error instanceof Error ? error.message : error}`)
+        streams.delete(att.target)
+        return
+      }
     }
     void state.session.update(state.text).catch(() => cancelStream(att.target))
   }
@@ -676,6 +682,8 @@ export async function apply(ctx, config = {}) {
     const state = streams.get(target)
     if (!state) return
     streams.delete(target)
+    const owner = [...bySession.entries()].find(([, att]) => att.target === target)
+    if (owner) logLine(owner[0], 'out', 'stream', 'cancelled')
     try { state.session?.cancel?.() } catch {}
   }
 
@@ -691,7 +699,9 @@ export async function apply(ctx, config = {}) {
     const state = streams.get(att.target)
     if (state?.session) {
       streams.delete(att.target)
-      try { await state.session.complete() } catch {}
+      try { await state.session.complete(); logLine(att.sessionId, 'out', 'stream', `${state.text.length} chars`) } catch (error) {
+        logLine(att.sessionId, 'out', 'stream', `complete failed: ${error instanceof Error ? error.message : error}`)
+      }
       return
     }
     streams.delete(att.target)
@@ -736,9 +746,21 @@ export async function apply(ctx, config = {}) {
       // alone silently disabled the `errors` switch for every tool throw.
       const failed = data.message?.isError === true || (data.error !== undefined && data.error !== null)
       if (att.errors && failed) {
-        try { await sendText(att.target, `⚠️ tool ${name ?? 'call'} failed: ${failureDetail(data)}`) } catch {}
+        const line = `⚠️ tool ${name ?? 'call'} failed: ${failureDetail(data)}`
+        try {
+          await sendText(att.target, line)
+          logLine(att.sessionId, 'out', 'tool-error', line)
+        } catch (error) {
+          logLine(att.sessionId, 'out', 'tool-error', `send failed: ${error instanceof Error ? error.message : error}`)
+        }
       } else if (att.toolResults) {
-        try { await sendText(att.target, `🔧 ${name ?? 'tool'} finished`) } catch {}
+        const line = `🔧 ${name ?? 'tool'} finished`
+        try {
+          await sendText(att.target, line)
+          logLine(att.sessionId, 'out', 'tool-result', line)
+        } catch (error) {
+          logLine(att.sessionId, 'out', 'tool-result', `send failed: ${error instanceof Error ? error.message : error}`)
+        }
       }
       return
     }
@@ -760,13 +782,23 @@ export async function apply(ctx, config = {}) {
           for (const path of files.slice(0, maxFiles)) {
             const result = await sendMediaFile(b, passive(att.target), path)
             if (result.outcome === 'failed') {
+              logLine(att.sessionId, 'out', 'deliverable', `${path} → failed: ${result.error}`)
               try { await sendText(att.target, `⚠️ file send failed: ${path}`) } catch {}
+            } else {
+              logLine(att.sessionId, 'out', 'deliverable', `${path} (${result.size} B)`)
             }
           }
+          if (files.length > maxFiles) logLine(att.sessionId, 'out', 'deliverable', `${files.length - maxFiles} file(s) over the limit not sent`)
         }
       }
       if (att.errors && reason.kind === 'error') {
-        try { await sendText(att.target, `⚠️ turn failed: ${reason.error?.code ?? 'ERROR'}`) } catch {}
+        const line = `⚠️ turn failed: ${reason.error?.code ?? 'ERROR'}`
+        try {
+          await sendText(att.target, line)
+          logLine(att.sessionId, 'out', 'turn-error', line)
+        } catch (error) {
+          logLine(att.sessionId, 'out', 'turn-error', `send failed: ${error instanceof Error ? error.message : error}`)
+        }
       }
       return
     }
@@ -854,6 +886,7 @@ export async function apply(ctx, config = {}) {
       case 'bind.cancel': stopBind?.(); stopBind = undefined; bindState = { phase: 'idle' }; return bindState
       case 'account.set': {
         await applyCredentials(String(payload.appId ?? ''), String(payload.appSecret ?? ''))
+        logAll('sys', 'account', `credentials set for ${String(payload.appId ?? '')}`)
         return { bound: true, appId: payload.appId }
       }
       case 'account.clear': {
@@ -862,6 +895,7 @@ export async function apply(ctx, config = {}) {
         await ctx.credentials.deleteRecord('qq-attach')
         await restartBot()
         bindState = { phase: 'idle' }
+        logAll('sys', 'account', 'credentials cleared')
         return { bound: false }
       }
       case 'chats.list': {
@@ -903,6 +937,7 @@ export async function apply(ctx, config = {}) {
         rebuild()
         await rememberChat(target, target.startsWith('group:') ? 'group' : 'c2c')
         ensureRuntime(resolved.agent)
+        logLine(sessionId, 'sys', 'attach', `attached to ${target}`)
         return attachOf(sessionId)
       }
       case 'attach.update': {
@@ -938,6 +973,7 @@ export async function apply(ctx, config = {}) {
         await attaches.delete(att.target)
         disposeRuntime(sessionId)
         rebuild()
+        logLine(sessionId, 'sys', 'attach', `detached from ${att.target}`)
         return { removed: true }
       }
       default: throw new Error(`unknown endpoint: ${endpoint}`)
