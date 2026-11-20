@@ -69,6 +69,14 @@ on the QQ attach tab.
 
 Dependencies come from the lockfile: `pnpm install`.
 
+The sources are plain JavaScript; `tsc` checks them in place with `checkJs`,
+which reports undefined names, misspelled properties and wrong argument counts
+without a build step:
+
+```sh
+pnpm typecheck
+```
+
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/):
 `<type>(<scope>)?: <subject>`, where type is one of `feat`, `fix`, `docs`,
 `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`.

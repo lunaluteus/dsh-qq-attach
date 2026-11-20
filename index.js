@@ -8,7 +8,7 @@
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { mkdir, readdir, stat, unlink } from 'node:fs/promises'
-import { QQBot } from '@tencent-connect/qqbot-nodejs'
+import { QQBot, historyBuffer, quoteRef, mentionGate } from '@tencent-connect/qqbot-nodejs'
 import { startQrConnect } from '@tencent-connect/qqbot-connector'
 import { z } from 'zod'
 import { chunkText, isWithinRoot, mediaTypeOf, stripMentions, MEDIA_ROOT } from './lib/util.js'
@@ -17,7 +17,7 @@ import { downloadAttachment, sendMediaFile } from './lib/media.js'
 export const name = 'qq-attach'
 
 /** Bumped on every behavioural change; surfaced by the `status` endpoint. */
-const BUILD = '0.2.4-inline-switches'
+const BUILD = '0.3.4-ctx-name-fix'
 export const inject = [
   'agents', 'sessions', 'sessionController', 'storageDomain', 'credentials',
   'webServer', 'systemPrompt', 'tools', 'sessionQuery', 'attachments',
@@ -98,6 +98,8 @@ export async function apply(ctx, config = {}) {
   const maxBytes = Math.max(1, Number(config.media?.maxMB ?? 200)) * 1024 * 1024
   const ttlHours = Math.max(0, Number(config.media?.ttlHours ?? 24))
   const maxFiles = Math.max(1, Number(config.sendFile?.maxFiles ?? 4))
+  // How many buffered group messages are handed to the agent as context.
+  const historyLimit = Math.max(0, Number(config.group?.historyLimit ?? 8))
 
   /** One entry per session id, derived from the attach table. */
   const bySession = new Map()
@@ -106,6 +108,16 @@ export async function apply(ctx, config = {}) {
     for (const [target, value] of attaches.entries()) bySession.set(value.sessionId, { ...value, target })
   }
   rebuild()
+
+  /**
+   * Inbound diagnostics: whether the platform delivered a message, whether the
+   * gate treated it as addressed, and whether it reached a session. Exposed by
+   * the status endpoint because a dropped message leaves no other trace.
+   */
+  const inbound = { total: 0, group: 0, groupSkipped: 0, delivered: 0, failed: 0, last: null }
+
+  /** Gateway state from the SDK's own ready/disconnected events. */
+  const link = { connected: false, readyAt: 0, disconnectedAt: 0, reason: null }
 
   /** Last inbound message id per target, for the passive reply window. */
   const lastMsg = new Map()
@@ -171,6 +183,18 @@ export async function apply(ctx, config = {}) {
       const secret = await readSecret()
       if (!secret) return undefined
       const created = new QQBot({ appId: saved.appId, appSecret: secret, logger: log })
+      // Buffer first so skipped messages are still recorded, then resolve quotes,
+      // then let the SDK decide whether this message addresses the bot. passthrough
+      // keeps the chain alive for messages the gate rejects.
+      created.use(historyBuffer({ limit: 50 }))
+      created.use(quoteRef())
+      created.use(mentionGate({ passthrough: true, requireMentionInGroup: true }))
+      created.on('ready', () => { link.connected = true; link.readyAt = Date.now(); link.reason = null })
+      created.on('disconnected', (event) => {
+        link.connected = false
+        link.disconnectedAt = Date.now()
+        link.reason = event?.reason ?? event?.code ?? 'disconnected'
+      })
       created.on('message', (messageCtx, message) => { void onInbound(messageCtx, message) })
       // SDK start() is a long-lived promise: it never resolves while connected and
       // rejects only when the gateway gives up. Do not await it.
@@ -309,32 +333,85 @@ export async function apply(ctx, config = {}) {
 
   // ---- inbound -----------------------------------------------------------
 
-  async function onInbound(_messageCtx, msg) {
+  async function onInbound(messageCtx, msg) {
     try {
       if (msg.kind !== 'c2c' && msg.kind !== 'group') return
+      inbound.total += 1
+      if (msg.kind === 'group') inbound.group += 1
       if (msg.senderIsBot) return
       const target = targetOf(msg)
       if (!target) return
       const att = attaches.get(target)
       if (!att) { await rememberChat(target, msg.kind); return }
-      const mentioned = msg.rawEventType === 'GROUP_AT_MESSAGE_CREATE'
-        || msg.mentions?.some(mention => mention?.is_you === true)
-      if (msg.kind === 'group' && !mentioned) return
+      // The SDK gate already covers the event type, the structured mention list and
+      // the content fallback; the inline check stays only as a safety net.
+      const decision = messageCtx?.state?.mention
+      const mentioned = decision !== undefined
+        ? decision.shouldAnswer
+        : msg.rawEventType === 'GROUP_AT_MESSAGE_CREATE'
+          || msg.mentions?.some(mention => mention?.is_you === true)
+      inbound.last = {
+        at: Date.now(),
+        kind: msg.kind,
+        event: msg.rawEventType ?? null,
+        addressed: mentioned,
+        text: String(msg.content ?? '').slice(0, 40),
+      }
+      if (msg.kind === 'group' && !mentioned) { inbound.groupSkipped += 1; return }
       const text = stripMentions(msg.content ?? '')
       const files = Array.isArray(msg.attachments) ? msg.attachments : []
       if (!text && files.length === 0) return
       lastMsg.set(target, { msgId: msg.messageId, at: Date.now(), count: 0 })
       const agent = await ensureAgent(att.sessionId)
       if (!agent) return
-      const content = await buildContent(text, files)
+      const prefix = contextPrefix(messageCtx, msg)
+      const content = await buildContent(prefix ? `${prefix}\n\n${text}` : text, files)
       if (content.length === 0) return
       const message = createUserMessage({ content, source: { kind: 'user' } })
       if (att.steer) agent.steer(message)
       else agent.followup(message)
+      inbound.delivered += 1
       try { await ctx.sessions.flush?.(agent.session) } catch {}
     } catch (error) {
+      inbound.failed += 1
+      inbound.error = String(error instanceof Error ? (error.stack ?? error.message) : error).slice(0, 400)
       log.warn(`qq-attach: inbound failed: ${error instanceof Error ? error.message : String(error)}`)
     }
+  }
+
+  /** Truncate one line of context without cutting a surrogate pair. */
+  const clip = (text, max) => {
+    const flat = String(text ?? '').replace(/\s+/g, ' ').trim()
+    return flat.length > max ? `${flat.slice(0, max)}…` : flat
+  }
+
+  /**
+   * Context the QQ platform attaches to one inbound message: the quoted message
+   * when the sender replied to something, plus buffered group chatter. Only the
+   * platform-pushed events are available; QQ exposes no history API.
+   */
+  function contextPrefix(messageCtx, msg) {
+    const state = messageCtx?.state ?? {}
+    const parts = []
+
+    const quote = state.quote
+    const quoteText = clip(stripMentions(quote?.text ?? ''), 300)
+    if (quoteText) {
+      const who = quote?.entry?.senderName || quote?.entry?.senderId
+      parts.push(`<reply_to>${who ? `${who}: ` : ''}${quoteText}</reply_to>`)
+    }
+
+    const history = Array.isArray(state.history) ? state.history : []
+    if (historyLimit > 0 && history.length > 0) {
+      const rows = history.slice(-historyLimit)
+        .map(entry => `${entry.senderName || entry.senderId || 'unknown'}: ${clip(stripMentions(entry.content ?? ''), 200)}`)
+        .filter(row => row.length > 0)
+      if (rows.length > 0) parts.push(`<history>\n${rows.join('\n')}\n</history>`)
+    }
+
+    if (parts.length === 0) return ''
+    const sender = msg.senderName || msg.senderId || 'unknown'
+    return `<qq_context>\nfrom: ${sender}\n${parts.join('\n')}\n</qq_context>`
   }
 
   async function buildContent(text, attachments) {
@@ -561,7 +638,7 @@ export async function apply(ctx, config = {}) {
       case 'status': {
         const saved = account.get('main')
         const hasSecret = Boolean(await readSecret())
-        return { build: BUILD, bound: Boolean(saved?.appId), appId: saved?.appId, running: Boolean(bot), hasSecret, error: botError ?? null }
+        return { build: BUILD, bound: Boolean(saved?.appId), appId: saved?.appId, running: Boolean(bot), hasSecret, error: botError ?? null, inbound: { ...inbound }, link: { ...link } }
       }
       case 'bind.start': return startBind()
       case 'bind.state': return bindState

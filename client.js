@@ -339,7 +339,7 @@ window.__ModuleLoader__.load({
     function SettingsSection(injected) {
       const { call, t, openAttach, close } = injected
       const [status, setStatus] = useState(null)
-      const [bind, setBind] = useState({ phase: 'idle' })
+      const [bind, setBind] = useState(/** @type {BindState} */ ({ phase: 'idle' }))
       const [list, setList] = useState([])
       const [appId, setAppId] = useState('')
       const [appSecret, setAppSecret] = useState('')
