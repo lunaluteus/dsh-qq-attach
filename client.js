@@ -20,6 +20,11 @@ window.__ModuleLoader__.load({
       bind: 'Attach',
       detach: 'Detach',
       attachedTo: 'Attached to another session',
+      attachedToActive: 'attached to an active session',
+      attachedToArchived: 'attached to an archived session',
+      attachBusy: 'is already attached to an active session. Attaching it here detaches that session.',
+      attachAnyway: 'Attach anyway',
+      cancel: 'Cancel',
       autoReply: 'Forward replies',
       streaming: 'Streaming (direct chat only)',
       toolResults: 'Forward tool results',
@@ -64,6 +69,11 @@ window.__ModuleLoader__.load({
       bind: '绑定',
       detach: '解绑',
       attachedTo: '已绑定到其他会话',
+      attachedToActive: '已挂载到活跃会话',
+      attachedToArchived: '已挂载到已归档会话',
+      attachBusy: '已挂载到一个活跃会话。在此挂载会将该会话解挂。',
+      attachAnyway: '仍要挂载',
+      cancel: '取消',
       autoReply: '自动转发回复',
       streaming: '流式输出（仅私聊）',
       toolResults: '转发工具结果',
@@ -203,6 +213,7 @@ window.__ModuleLoader__.load({
       const [feedback, setFeedback] = useState(null)
       const [focused, setFocused] = useState(false)
       const [logLines, setLogLines] = useState([])
+      const [pendingSteal, setPendingSteal] = useState(null)
 
       const notify = (message) => setFeedback({ message, at: Date.now() })
 
@@ -211,6 +222,7 @@ window.__ModuleLoader__.load({
         setDraft(undefined)
         setFeedback(null)
         setFocused(false)
+        setPendingSteal(null)
       }, [sessionId])
 
       const refresh = useCallback(async () => {
@@ -284,8 +296,18 @@ window.__ModuleLoader__.load({
         const options = chats.map(chat => h('option', {
           key: chat.target,
           value: chat.target,
-          disabled: Boolean(chat.attachedTo && chat.attachedTo !== sessionId),
-        }, `${chat.target}${chat.attachedTo && chat.attachedTo !== sessionId ? ' — ' + t('attachedTo') : ''}`))
+        }, `${chat.target}${chat.attachedTo && chat.attachedTo !== sessionId
+            ? ` — ${chat.archived ? t('attachedToArchived') : t('attachedToActive')}`
+            : ''}`))
+
+        const bind = async () => {
+          const target = manual.trim()
+          if (!target) return
+          const holder = chats.find(chat => chat.target === target && chat.attachedTo && chat.attachedTo !== sessionId)
+          // Only an active holder needs a second confirmation; an archived one is inert.
+          if (holder && !holder.archived) { setPendingSteal(holder); return }
+          await mutate('attach.set', { sessionId, target, steal: Boolean(holder) })
+        }
         return h('div', { style: styles.card },
           h('div', { style: { fontWeight: 600 } }, t('none')),
           h('div', { style: styles.row },
@@ -299,13 +321,28 @@ window.__ModuleLoader__.load({
               style: styles.input,
               placeholder: 'c2c:<openid> / group:<openid>',
               value: manual,
-              onChange: event => setManual(event.target.value),
+              onChange: event => { setManual(event.target.value); setPendingSteal(null) },
             }),
             h('button', {
               style: { ...styles.button, ...styles.primary },
-              disabled: busy || !manual.trim(),
-              onClick: () => mutate('attach.set', { sessionId, target: manual.trim() }),
+              disabled: busy || !manual.trim() || pendingSteal !== null,
+              onClick: bind,
             }, t('bind'))),
+          pendingSteal === null
+            ? null
+            : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+                h('div', { style: styles.muted }, `${pendingSteal.target} ${t('attachBusy')}`),
+                h('div', { style: styles.row },
+                  h('button', {
+                    style: { ...styles.button, ...styles.primary },
+                    disabled: busy,
+                    onClick: async () => {
+                      const target = pendingSteal.target
+                      setPendingSteal(null)
+                      await mutate('attach.set', { sessionId, target, steal: true })
+                    },
+                  }, t('attachAnyway')),
+                  h('button', { style: styles.button, onClick: () => setPendingSteal(null) }, t('cancel')))),
           error ? h('div', { style: styles.error }, error) : null)
       }
 

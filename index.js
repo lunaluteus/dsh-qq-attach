@@ -17,10 +17,11 @@ import { downloadAttachment, sendMediaFile } from './lib/media.js'
 export const name = 'qq-attach'
 
 /** Bumped on every behavioural change; surfaced by the `status` endpoint. */
-const BUILD = '0.7.0-mode-tools'
+const BUILD = '0.8.0-takeover'
+
 export const inject = [
   'agents', 'sessions', 'sessionController', 'storageDomain', 'credentials',
-  'webServer', 'systemPrompt', 'tools', 'sessionQuery', 'attachments',
+  'webServer', 'systemPrompt', 'tools', 'sessionQuery', 'attachments', 'workspaceRegistry',
 ]
 
 const Attach = z.object({
@@ -100,6 +101,10 @@ export async function apply(ctx, config = {}) {
   const maxFiles = Math.max(1, Number(config.sendFile?.maxFiles ?? 4))
   // How many buffered group messages are handed to the agent as context.
   const historyLimit = Math.max(0, Number(config.group?.historyLimit ?? 8))
+
+  /** Whether a session is archived, which blocks every model step it proposes. */
+  const isArchived = (sessionId) =>
+    ctx.workspaceRegistry?.archivedSessionIds?.includes(sessionId) === true
 
   /** One entry per session id, derived from the attach table. */
   const bySession = new Map()
@@ -514,6 +519,10 @@ export async function apply(ctx, config = {}) {
 
       const text = renderMentions(msg.content ?? '', resolveMention)
       if (!text && attachments.length === 0) return
+      if (isArchived(att.sessionId)) {
+        logLine(att.sessionId, 'in', 'error', 'session is archived; no turn can run, message dropped')
+        return
+      }
       lastMsg.set(target, { msgId: msg.messageId, at: Date.now(), count: 0 })
       const agent = await ensureAgent(att.sessionId)
       if (!agent) {
@@ -922,7 +931,10 @@ export async function apply(ctx, config = {}) {
       case 'chats.list': {
         const rows = [...chats.entries()]
           .sort((a, b) => b[1].lastSeen - a[1].lastSeen)
-          .map(([target, value]) => ({ target, kind: value.kind, lastSeen: value.lastSeen, attachedTo: attaches.get(target)?.sessionId ?? null }))
+          .map(([target, value]) => {
+            const holder = attaches.get(target)?.sessionId ?? null
+            return { target, kind: value.kind, lastSeen: value.lastSeen, attachedTo: holder, archived: holder === null ? false : isArchived(holder) }
+          })
         return rows
       }
       case 'attach.get': return attachOf(String(payload.sessionId ?? ''))
@@ -942,7 +954,13 @@ export async function apply(ctx, config = {}) {
         const current = bySession.get(sessionId)
         if (current && current.target !== target) throw new Error('detach the current chat first')
         const holder = attaches.get(target)
-        if (holder && holder.sessionId !== sessionId) throw new Error('this chat is attached to another session')
+        if (holder && holder.sessionId !== sessionId) {
+          if (payload.steal !== true) throw new Error('this chat is attached to another session')
+          // Takeover is explicit: the previous session loses the chat and its tools.
+          await attaches.delete(target)
+          disposeRuntime(holder.sessionId)
+          logLine(holder.sessionId, 'sys', 'attach', `detached: the chat was claimed by ${sessionId}`)
+        }
         const record = {
           sessionId,
           autoReply: current?.autoReply ?? true,
